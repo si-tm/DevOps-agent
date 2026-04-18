@@ -30,6 +30,13 @@ Resources:
         {
           "discord_webhook_url": "${DiscordWebhookUrl}"
         }
+      Tags:
+        - Key: Service
+          Value: devops-agent
+        - Key: Status
+          Value: test
+        - Key: User
+          Value: "100"
 
   # -------------------------------------------------------
   # IAM Role - Lambda実行ロール
@@ -45,6 +52,13 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+      Tags:
+        - Key: Service
+          Value: devops-agent
+        - Key: Status
+          Value: test
+        - Key: User
+          Value: "100"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
@@ -92,6 +106,13 @@ Resources:
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           SECRET_ARN: !Ref AgentSecrets
           AWS_REGION_NAME: !Ref AWS::Region
+      Tags:
+        - Key: Service
+          Value: devops-agent
+        - Key: Status
+          Value: test
+        - Key: User
+          Value: "100"
       Code:
         ZipFile: |
           import json
@@ -216,6 +237,13 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub "devops-agent-alarms-${Environment}"
+      Tags:
+        - Key: Service
+          Value: devops-agent
+        - Key: Status
+          Value: test
+        - Key: User
+          Value: "100"
 
   AgentSNSPermission:
     Type: AWS::Lambda::Permission
@@ -240,6 +268,13 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/devops-agent-${Environment}"
       RetentionInDays: 30
+      Tags:
+        - Key: Service
+          Value: devops-agent
+        - Key: Status
+          Value: test
+        - Key: User
+          Value: "100"
 
 Outputs:
   LambdaFunctionName:
