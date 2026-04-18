@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "DevOps Agent - Minimal Stack"
+
+Parameters:
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Slack Incoming Webhook URL
+
+  BedrockModelId:
+    Type: String
+    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    Description: Bedrock model ID for the agent
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prod]
+
+Resources:
+  # -------------------------------------------------------
+  # Secrets Manager - 認証情報の安全な保管
+  # -------------------------------------------------------
+  AgentSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "devops-agent/${Environment}/secrets"
+      Description: "DevOps Agent credentials"
+      SecretString: !Sub |
+        {
+          "slack_webhook_url": "${SlackWebhookUrl}"
+        }
+
+  # -------------------------------------------------------
+  # IAM Role - Lambda実行ロール
+  # -------------------------------------------------------
+  AgentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "devops-agent-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AgentPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockAccess
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+              - Sid: CloudWatchReadAccess
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: SecretsAccess
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref AgentSecrets
+
+  # -------------------------------------------------------
+  # Lambda - DevOps Agentメイン処理
+  # -------------------------------------------------------
+  AgentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "devops-agent-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          SECRET_ARN: !Ref AgentSecrets
+          AWS_REGION_NAME: !Ref AWS::Region
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib.request
+          import os
+
+          bedrock = boto3.client("bedrock-runtime")
+          cloudwatch = boto3.client("cloudwatch")
+          secrets = boto3.client("secretsmanager")
+
+
+          def get_secret():
+              resp = secrets.get_secret_value(SecretId=os.environ["SECRET_ARN"])
+              return json.loads(resp["SecretString"])
+
+
+          def get_active_alarms():
+              resp = cloudwatch.describe_alarms(StateValue="ALARM")
+              alarms = resp.get("MetricAlarms", [])
+              return [
+                  {
+                      "name": a["AlarmName"],
+                      "reason": a["StateReason"],
+                      "metric": a.get("MetricName", ""),
+                      "namespace": a.get("Namespace", ""),
+                  }
+                  for a in alarms[:10]
+              ]
+
+
+          def analyze_with_bedrock(alarms):
+              if not alarms:
+                  return "現在アクティブなアラームはありません。"
+
+              alarm_text = json.dumps(alarms, ensure_ascii=False, indent=2)
+              prompt = f"""あなたはDevOpsエンジニアです。
+          以下のCloudWatchアラームを分析し、日本語で簡潔に報告してください。
+
+          アラーム情報:
+          {alarm_text}
+
+          以下の形式で回答してください:
+          - 概要: (何が起きているか)
+          - 影響: (想定される影響)
+          - 推奨対応: (すぐに行うべきアクション)"""
+
+              resp = bedrock.invoke_model(
+                  modelId=os.environ["BEDROCK_MODEL_ID"],
+                  body=json.dumps({
+                      "anthropic_version": "bedrock-2023-05-31",
+                      "max_tokens": 1024,
+                      "messages": [{"role": "user", "content": prompt}],
+                  }),
+              )
+              result = json.loads(resp["body"].read())
+              return result["content"][0]["text"]
+
+
+          def send_slack(webhook_url, alarms, analysis):
+              color = "danger" if alarms else "good"
+              alarm_count = len(alarms)
+              payload = {
+                  "attachments": [
+                      {
+                          "color": color,
+                          "title": f"DevOps Agent レポート - アラーム数: {alarm_count}",
+                          "text": analysis,
+                          "footer": "DevOps Agent | CloudWatch",
+                      }
+                  ]
+              }
+              data = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  webhook_url,
+                  data=data,
+                  headers={"Content-Type": "application/json"},
+              )
+              urllib.request.urlopen(req, timeout=10)
+
+
+          def handler(event, context):
+              secret = get_secret()
+              alarms = get_active_alarms()
+              analysis = analyze_with_bedrock(alarms)
+              send_slack(secret["slack_webhook_url"], alarms, analysis)
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "alarm_count": len(alarms),
+                      "analysis": analysis,
+                  }),
+              }
+
+  # -------------------------------------------------------
+  # EventBridge - 定期実行スケジュール (15分ごと)
+  # -------------------------------------------------------
+  AgentScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "devops-agent-schedule-${Environment}"
+      Description: "Trigger DevOps Agent every 15 minutes"
+      ScheduleExpression: "rate(15 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: AgentLambdaTarget
+          Arn: !GetAtt AgentLambda.Arn
+
+  AgentSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AgentLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentScheduleRule.Arn
+
+  # -------------------------------------------------------
+  # CloudWatch Alarm → SNS → Lambda (アラームトリガー)
+  # -------------------------------------------------------
+  AgentAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "devops-agent-alarms-${Environment}"
+
+  AgentSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AgentLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AgentAlarmTopic
+
+  AgentSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AgentAlarmTopic
+      Protocol: lambda
+      Endpoint: !GetAtt AgentLambda.Arn
+
+  # -------------------------------------------------------
+  # CloudWatch Log Group
+  # -------------------------------------------------------
+  AgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/devops-agent-${Environment}"
+      RetentionInDays: 30
+
+Outputs:
+  LambdaFunctionName:
+    Value: !Ref AgentLambda
+    Description: Lambda function name
+
+  LambdaFunctionArn:
+    Value: !GetAtt AgentLambda.Arn
+
+  SNSTopicArn:
+    Value: !Ref AgentAlarmTopic
+    Description: "CloudWatch AlarmのActionにこのARNを設定してください"
+
+  SecretArn:
+    Value: !Ref AgentSecrets
+    Description: Secrets Manager ARN
