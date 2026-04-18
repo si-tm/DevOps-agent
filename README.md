@@ -35,3 +35,15 @@ cp .env.example .env
 pip install -r requirements.txt
 python src/agents/main.py
 ```
+
+## Deploy (CloudFormation)
+```bash
+aws cloudformation deploy \
+  --template-file infra/devops-agent-minimal.yaml \
+  --stack-name devops-agent-dev \
+  --parameter-overrides \
+      DiscordWebhookUrl=https://discord.com/api/webhooks/xxx/yyy \
+      Environment=dev \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region ap-northeast-1
+```
