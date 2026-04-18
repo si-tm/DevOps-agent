@@ -2,10 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: "DevOps Agent - Minimal Stack"
 
 Parameters:
-  SlackWebhookUrl:
+  DiscordWebhookUrl:
     Type: String
     NoEcho: true
-    Description: Slack Incoming Webhook URL
+    Description: Discord Webhook URL
 
   BedrockModelId:
     Type: String
@@ -28,7 +28,7 @@ Resources:
       Description: "DevOps Agent credentials"
       SecretString: !Sub |
         {
-          "slack_webhook_url": "${SlackWebhookUrl}"
+          "discord_webhook_url": "${DiscordWebhookUrl}"
         }
 
   # -------------------------------------------------------
@@ -151,16 +151,16 @@ Resources:
               return result["content"][0]["text"]
 
 
-          def send_slack(webhook_url, alarms, analysis):
-              color = "danger" if alarms else "good"
+          def send_discord(webhook_url, alarms, analysis):
               alarm_count = len(alarms)
+              color = 0xED4245 if alarms else 0x57F287  # red or green
               payload = {
-                  "attachments": [
+                  "embeds": [
                       {
-                          "color": color,
                           "title": f"DevOps Agent レポート - アラーム数: {alarm_count}",
-                          "text": analysis,
-                          "footer": "DevOps Agent | CloudWatch",
+                          "description": analysis,
+                          "color": color,
+                          "footer": {"text": "DevOps Agent | CloudWatch"},
                       }
                   ]
               }
@@ -177,7 +177,7 @@ Resources:
               secret = get_secret()
               alarms = get_active_alarms()
               analysis = analyze_with_bedrock(alarms)
-              send_slack(secret["slack_webhook_url"], alarms, analysis)
+              send_discord(secret["discord_webhook_url"], alarms, analysis)
 
               return {
                   "statusCode": 200,
